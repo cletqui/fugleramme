@@ -17,6 +17,7 @@ import urllib.request
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
+from urllib.parse import urljoin
 
 import pytest
 from PIL import Image
@@ -436,20 +437,20 @@ def test_a_station_typed_as_birdnet_go_s_address_is_refused(frame, tmp_path):
     fields = {"detector_kind": "birdnet-go", "detector_url": station}
 
     status, headers, _body = _post(frame + "/admin", fields)
-    assert (status, headers["Location"]) == (303, "/admin?refused=birdnet-go&stations=")
+    assert (status, headers["Location"]) == (303, "admin?refused=birdnet-go&stations=")
     assert store.get().detector_url == Settings().detector_url
 
-    _status, _headers, page = _fetch(frame + headers["Location"])
+    _status, _headers, page = _fetch(frame + "/" + headers["Location"])
     assert b"Not saved. That is a BirdWeather station." in page
 
 
 def test_a_refused_station_is_named_on_the_page_it_comes_back_to(frame, tmp_path):
     rows = [("detector_station", "31086"), ("detector_station", "nest box")]
     status, headers, _body = _post(frame + "/admin", [("detector_kind", "birdweather"), *rows])
-    assert status == 303 and headers["Location"].startswith("/admin?refused=birdweather&")
+    assert status == 303 and headers["Location"].startswith("admin?refused=birdweather&")
     assert SettingsStore(tmp_path / SETTINGS).get().detector_station == ""
 
-    _status, _headers, page = _fetch(frame + headers["Location"])
+    _status, _headers, page = _fetch(frame + "/" + headers["Location"])
     assert b"Not saved. &#34;nest box&#34; is not a BirdWeather station." in page
 
 
@@ -458,7 +459,7 @@ def test_a_station_is_saved_from_its_id(frame, tmp_path):
     status, headers, _body = _post(
         frame + "/admin", {"detector_kind": "birdweather", "detector_station": "31086"}
     )
-    assert (status, headers["Location"]) == (303, "/admin")
+    assert (status, headers["Location"]) == (303, "admin")
     saved = store.get()
     assert (saved.detector_kind, saved.detector_station, saved.detector_url) == (
         "birdweather",
@@ -535,7 +536,7 @@ def test_a_password_sends_a_browser_to_the_login_page(locked):
     to look like the product it opens."""
     for route in sorted(server.GATED):
         status, headers, _body = _fetch(locked + route, headers=BROWSER, follow=False)
-        assert (status, headers["Location"]) == (303, LOGIN)
+        assert (status, urljoin(locked + route, headers["Location"])) == (303, locked + LOGIN)
         assert "WWW-Authenticate" not in headers
 
     # The admin's own fetches are not browsing: they get an answer, not a page.
@@ -564,7 +565,10 @@ def test_every_icon_in_the_manifest_has_its_declared_size(locked):
     manifest = json.loads(_fetch(locked + "/manifest.webmanifest")[2])
     for icon in manifest["icons"]:
         width, height = map(int, icon["sizes"].split("x"))
-        assert _size(_fetch(locked + icon["src"])[2]) == (width, height)
+        assert _size(_fetch(urljoin(locked + "/manifest.webmanifest", icon["src"]))[2]) == (
+            width,
+            height,
+        )
 
 
 def test_signing_in_opens_the_admin_and_signing_out_shuts_it(locked):
@@ -708,28 +712,28 @@ def test_signing_out_of_an_open_frame_writes_nothing(frame, tmp_path):
     """Nothing is signed in and nothing is gated, so a stranger reaches this one:
     rotating a secret nobody uses would be an SD-card write for the asking."""
     status, headers, _body = _post(frame + LOGOUT, {})
-    assert (status, headers["Location"]) == (303, LOGIN)
+    assert (status, urljoin(frame + LOGOUT, headers["Location"])) == (303, frame + LOGIN)
     assert not (tmp_path / SETTINGS).exists()
 
 
 def test_signing_out_sends_the_browser_back_to_the_door(locked):
     session = _signed_in(locked)
     status, headers, _body = _post(locked + LOGOUT, {}, session)
-    assert (status, headers["Location"]) == (303, LOGIN)
+    assert (status, urljoin(locked + LOGOUT, headers["Location"])) == (303, locked + LOGIN)
     assert headers["Set-Cookie"].startswith(f"{server.COOKIE}=;")
 
 
 def test_the_login_page_sends_a_signed_in_browser_on(locked):
     """Nothing to do at the door once it is open."""
     status, headers, _body = _fetch(locked + LOGIN, headers=_signed_in(locked), follow=False)
-    assert (status, headers["Location"]) == (303, "/admin")
+    assert (status, urljoin(locked + LOGIN, headers["Location"])) == (303, locked + "/admin")
 
 
 def test_a_signed_out_browser_posting_the_form_lands_on_the_login_page(locked):
     """A Save with an expired session is a browser, not a fetch: it gets the door,
     not a 401 it would render as a broken page."""
     status, headers, _body = _post(locked + "/admin", {"mode": "latest"}, BROWSER)
-    assert (status, headers["Location"]) == (303, LOGIN)
+    assert (status, urljoin(locked + "/admin", headers["Location"])) == (303, locked + LOGIN)
 
 
 def test_the_session_cookie_is_kept_from_script_and_from_other_sites(locked):
@@ -1047,3 +1051,18 @@ def test_a_margin_test_paints_the_kiosk_and_moves_its_token(frame):
     page = Image.open(io.BytesIO(_fetch(frame + "/collage.png")[2])).convert("RGB")
     assert page.getpixel((5, 5)) == (0, 0, 0)
     assert page.getpixel((page.width // 2, page.height // 2)) != (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("target", "page", "expected"),
+    [
+        ("/admin", "/admin", "admin"),
+        ("/admin", "/admin/login", "../admin"),
+        ("/admin/login", "/admin/logout", "../admin/login"),
+        ("/admin?refused=x", "/admin", "admin?refused=x"),
+        ("/", "/", "./"),
+    ],
+)
+def test_a_redirect_names_its_target_from_the_page_that_asked(target, page, expected):
+    """Relative, so a proxy serving the frame under a prefix needs no setting."""
+    assert server._relative(target, page) == expected

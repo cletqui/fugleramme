@@ -146,6 +146,12 @@ def _retry_after(status: int) -> dict[str, str] | None:
     return {"Retry-After": str(WINDOW)} if status == 429 else None
 
 
+def _relative(target: str, request_path: str) -> str:
+    """A path of this frame as seen from the page asking, so a proxy that serves the
+    frame under a prefix and strips it needs no setting."""
+    return "../" * (request_path.count("/") - 1) + target.lstrip("/") or "./"
+
+
 def _set_cookie(value: str, seconds: int) -> str:
     # No Secure: the frame is http://<pi>:8080 and the flag would drop the cookie
     # on every LAN install. Lax keeps it off another site's cross-site POST.
@@ -276,7 +282,7 @@ def make_handler(
 
         def _redirect(self, location: str, cookie: str = ""):
             self.send_response(303)
-            self.send_header("Location", location)
+            self.send_header("Location", _relative(location, urlparse(self.path).path))
             if cookie:
                 self.send_header("Set-Cookie", cookie)
             self.send_header("Content-Length", "0")
